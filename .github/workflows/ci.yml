@@ -23,6 +23,12 @@ jobs:
           python -m py_compile contracts/x402_oracle.py
           echo "contracts compiled OK"
 
+      - name: Install test deps
+        run: pip install pytest
+
+      - name: Run unit tests
+        run: pytest -q
+
   frontend:
     name: Frontend typecheck (advisory)
     runs-on: ubuntu-latest
