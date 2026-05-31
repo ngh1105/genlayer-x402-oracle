@@ -8,6 +8,7 @@
     "build": "tsc -p tsconfig.json",
     "dev": "tsx src/client.ts",
     "deploy": "tsx src/deploy.ts",
+    "interact": "tsx src/interact.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

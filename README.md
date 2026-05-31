@@ -180,7 +180,9 @@ per-query ceiling, and the payment key never lives in contract storage
   threat-model notes on a single-payer / co-processor design.
 - **Server honesty.** A malicious 402 server can lie about price or content;
   the whitelist + ceiling + consensus mitigate but don't fully eliminate this.
-- **Not audited, not deployed.** This is a scaffold/spec.
+- **Not audited.** Deterministic paths are deployed + verified on studionet
+  (see `DEPLOYMENTS.md`), but the contract is unaudited and the paid `resolve()`
+  path is not production-ready.
 
 ---
 
