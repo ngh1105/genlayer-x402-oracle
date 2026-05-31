@@ -112,9 +112,17 @@ async function main(): Promise<void> {
     status: TransactionStatus.FINALIZED,
   });
 
-  // contractAddress is populated on a successful deployment receipt.
-  const address = (receipt as { contractAddress?: string }).contractAddress;
+  // GenLayer deploy receipts expose the new contract under `recipient`
+  // (the created contract account). Fall back to other shapes defensively.
+  const r = receipt as {
+    contractAddress?: string;
+    recipient?: string;
+    data?: { contract_address?: string };
+  };
+  const address = r.recipient ?? r.contractAddress ?? r.data?.contract_address;
   if (!address) {
+    console.log("\n⚠ Finalized but address field not found. Raw receipt:");
+    console.log(JSON.stringify(receipt, null, 2));
     throw new Error("Deployment finalized but no contract address was returned.");
   }
 
