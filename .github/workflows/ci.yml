@@ -37,14 +37,10 @@ jobs:
         with:
           node-version: "20"
 
-      # The frontend is an illustrative stub written against a representative
-      # genlayer-js surface. Type drift vs. the published SDK is expected, so
-      # this job is advisory (non-blocking) until the client is wired to a
-      # pinned, real SDK version.
+      # Frontend client is wired to the pinned genlayer-js SDK and must
+      # typecheck cleanly. This job is blocking.
       - name: Install deps
         run: npm install --no-audit --no-fund
-        continue-on-error: true
 
       - name: Typecheck
         run: npm run typecheck
-        continue-on-error: true

@@ -15,12 +15,9 @@
  * Treat any unfamiliar symbol as a documented assumption (see README).
  */
 
-import {
-  createClient,
-  createAccount,
-  // @ts-expect-error — chain export name may differ per genlayer-js version
-  studionet,
-} from "genlayer-js";
+import { createClient, createAccount } from "genlayer-js";
+import { studionet } from "genlayer-js/chains";
+import { TransactionStatus } from "genlayer-js/types";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -84,7 +81,7 @@ async function submitQuery(
   // Block until validators append + finalize the transaction.
   await client.waitForTransactionReceipt({
     hash: txHash,
-    status: "FINALIZED",
+    status: TransactionStatus.FINALIZED,
   });
 
   return txHash;
@@ -111,7 +108,7 @@ async function resolveQuery(
   });
   await client.waitForTransactionReceipt({
     hash: txHash,
-    status: "FINALIZED",
+    status: TransactionStatus.FINALIZED,
   });
   return txHash;
 }
@@ -137,7 +134,7 @@ async function readResult(
     address: CONTRACT_ADDRESS,
     functionName: "get_result",
     args: [queryId],
-  })) as OracleResult;
+  })) as unknown as OracleResult;
   return result;
 }
 
