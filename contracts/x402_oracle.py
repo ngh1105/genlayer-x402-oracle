@@ -1,3 +1,4 @@
+# { "Depends": "py-genlayer:test" }
 # x402_oracle.py
 # =============================================================================
 # x402 Paywalled-Data Oracle — GenLayer Intelligent Contract (skeleton)
