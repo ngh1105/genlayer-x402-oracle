@@ -1,4 +1,6 @@
-# { "Depends": "py-genlayer:test" }
+# v0.2.16
+# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
+
 # x402_oracle.py
 # =============================================================================
 # x402 Paywalled-Data Oracle — GenLayer Intelligent Contract (skeleton)
@@ -34,8 +36,6 @@
 # stubbed with a clear `# TODO:`.
 # =============================================================================
 
-from __future__ import annotations
-
 # GenLayer GenVM SDK. The `gl` namespace exposes:
 #   gl.public.write / gl.public.view  -> method decorators
 #   gl.nondet.web.render(...)         -> non-deterministic web fetch
@@ -47,6 +47,7 @@ from genlayer import *  # noqa: F401,F403  (GenLayer convention)
 
 import json
 import typing
+from dataclasses import dataclass
 
 
 # -----------------------------------------------------------------------------

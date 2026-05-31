@@ -77,10 +77,11 @@ function initialWhitelist(): string[] {
 }
 
 /** Read the contract source relative to this script (../contracts/...). */
-function readContractCode(): string {
+function readContractCode(): Uint8Array {
   const here = dirname(fileURLToPath(import.meta.url));
   const path = resolve(here, "..", "..", "contracts", "x402_oracle.py");
-  return readFileSync(path, "utf8");
+  // GenLayer expects raw bytes for the contract module, not a UTF-8 string.
+  return new Uint8Array(readFileSync(path));
 }
 
 // ---------------------------------------------------------------------------
@@ -100,6 +101,9 @@ async function main(): Promise<void> {
 
   const client = createClient({ chain, account });
 
+  // Required before deploying on studionet/testnet.
+  await client.initializeConsensusSmartContract();
+
   const txHash = await client.deployContract({
     code,
     // Constructor: X402Oracle.__init__(self, initial_whitelist: list[str])
@@ -107,23 +111,29 @@ async function main(): Promise<void> {
   });
   console.log("  deploy tx: ", txHash);
 
+  // Contracts are queryable at ACCEPTED (optimistic state); FINALIZED is slower
+  // and not required to read state.
   const receipt = await client.waitForTransactionReceipt({
     hash: txHash as Hash,
-    status: TransactionStatus.FINALIZED,
+    status: TransactionStatus.ACCEPTED,
   });
 
-  // GenLayer deploy receipts expose the new contract under `recipient`
-  // (the created contract account). Fall back to other shapes defensively.
+  // Address derivation differs by network (per official deployScript.ts):
+  //  - localnet:           receipt.data.contract_address
+  //  - studionet/testnet:  receipt.txDataDecoded.contractAddress
   const r = receipt as {
-    contractAddress?: string;
-    recipient?: string;
     data?: { contract_address?: string };
+    txDataDecoded?: { contractAddress?: string };
+    recipient?: string;
   };
-  const address = r.recipient ?? r.contractAddress ?? r.data?.contract_address;
+  const isLocal = chain.id === localnet.id;
+  const address = isLocal
+    ? r.data?.contract_address
+    : r.txDataDecoded?.contractAddress ?? r.recipient;
   if (!address) {
-    console.log("\n⚠ Finalized but address field not found. Raw receipt:");
+    console.log("\n⚠ Accepted but address field not found. Raw receipt:");
     console.log(JSON.stringify(receipt, null, 2));
-    throw new Error("Deployment finalized but no contract address was returned.");
+    throw new Error("Deployment accepted but no contract address was returned.");
   }
 
   console.log("\n✅ Deployed x402_oracle at:", address);
