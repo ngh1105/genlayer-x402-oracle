@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  contracts:
+    name: Intelligent Contract (py_compile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Byte-compile contracts
+        run: |
+          python -m py_compile contracts/x402_oracle.py
+          echo "contracts compiled OK"
+
+  frontend:
+    name: Frontend typecheck (advisory)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # The frontend is an illustrative stub written against a representative
+      # genlayer-js surface. Type drift vs. the published SDK is expected, so
+      # this job is advisory (non-blocking) until the client is wired to a
+      # pinned, real SDK version.
+      - name: Install deps
+        run: npm install --no-audit --no-fund
+        continue-on-error: true
+
+      - name: Typecheck
+        run: npm run typecheck
+        continue-on-error: true
