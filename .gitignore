@@ -1,0 +1,53 @@
+# ---------- Node / TypeScript (frontend) ----------
+node_modules/
+dist/
+build/
+.cache/
+coverage/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-store/
+.npm/
+.yarn/
+
+# Env / secrets (NEVER commit payment keys or RPC creds)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets.json
+wallet.json
+
+# ---------- Python / GenVM (contract) ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+.eggs/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---------- Editor / OS ----------
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ---------- GenLayer local artifacts ----------
+.genlayer/
+deployments.local.json
