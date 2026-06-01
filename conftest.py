@@ -31,10 +31,14 @@ def _install_genlayer_stub() -> None:
         def view(fn):
             return fn
 
-    # --- eq_principle: callable as decorator factory or direct passthrough --
+    # --- eq_principle: EXECUTE the non-det closure and return its value -----
+    # GenLayer runs the leader closure and reconciles validators; for unit
+    # tests we faithfully CALL the closure so the contract's two-phase flow is
+    # actually exercised. (The earlier passthrough stub never called it, which
+    # is why resolve() was never unit-tested before.)
     def _eq_principle(*args, **kwargs):
         if args and callable(args[0]):
-            return args[0]
+            return args[0]()
 
         def _deco(fn):
             return fn
@@ -42,17 +46,38 @@ def _install_genlayer_stub() -> None:
         return _deco
 
     # --- the `gl` namespace -------------------------------------------------
+    # Storage-backed contract base: GenVM auto-initializes typed storage fields
+    # (TreeMap/DynArray) before the contract's __init__ runs. We emulate that
+    # here so unit tests can actually construct the contract and exercise its
+    # state machine, not just the pure helpers.
+    class _TreeMap(dict):
+        """dict-backed stand-in for GenLayer's TreeMap (has .get already)."""
+
     class _Contract:
-        """Stand-in base class for gl.Contract."""
+        """Stand-in base class for gl.Contract with auto storage init."""
+
+        def __new__(cls, *args, **kwargs):
+            self = super().__new__(cls)
+            anns = {}
+            for klass in reversed(cls.__mro__):
+                anns.update(getattr(klass, "__annotations__", {}))
+            for name, ann in anns.items():
+                if ann is _TreeMapMarker:
+                    setattr(self, name, _TreeMap())
+            return self
 
     gl = types.SimpleNamespace()
     gl.Contract = _Contract
     gl.public = _Public()
-    gl.message = types.SimpleNamespace(sender_account="0xStubSenderAccount")
+    # Real SDK attribute is `sender_address` (the contract + verified studionet
+    # deploy use it). Kept mutable so tests can simulate owner/relayer/other
+    # senders for access-control checks.
+    gl.message = types.SimpleNamespace(sender_address="0xStubSender")
     gl.block = types.SimpleNamespace(timestamp=1_900_000_000)
     gl.nondet = types.SimpleNamespace(
         web=types.SimpleNamespace(
-            render=lambda *a, **k: {"status": 200, "body": "", "headers": {}}
+            get=lambda *a, **k: {"status": 200, "body": "", "headers": {}},
+            render=lambda *a, **k: {"status": 200, "body": "", "headers": {}},
         ),
         exec_prompt=lambda *a, **k: "",
     )
@@ -62,7 +87,15 @@ def _install_genlayer_stub() -> None:
         prompt_non_comparative=_eq_principle,
     )
 
-    # --- storage primitives: referenced only in (stringified) annotations ---
+    # --- storage primitives: TreeMap is dict-backed (real, for state tests);
+    #     DynArray and other generics are inert annotation placeholders. -----
+    class _TreeMapMarker:
+        """Sentinel left in annotations so _Contract.__new__ can init it."""
+
+    class _TreeMapType:
+        def __class_getitem__(cls, _item):
+            return _TreeMapMarker
+
     class _Generic:
         def __class_getitem__(cls, _item):
             return cls
@@ -74,7 +107,7 @@ def _install_genlayer_stub() -> None:
 
     mod.gl = gl
     mod.Contract = _Contract
-    mod.TreeMap = _Generic
+    mod.TreeMap = _TreeMapType
     mod.DynArray = _Generic
     mod.Address = str
     mod.allow_storage = lambda x: x

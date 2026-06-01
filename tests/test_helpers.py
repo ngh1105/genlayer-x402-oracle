@@ -122,9 +122,15 @@ def test_payment_ref_reads_either_header_casing():
 
 
 # ---------------------------------------------------------------------------
-# payment signing is intentionally stubbed -> must raise NotImplementedError
+# payment signing is now an off-chain relayer boundary (no in-contract stub):
+# the deterministic payment-intent builder must bind the replay-sensitive
+# fields so the relayer signs exactly the authorized payment.
 # ---------------------------------------------------------------------------
 
-def test_sign_payment_is_stubbed():
-    with pytest.raises(NotImplementedError):
-        oracle._sign_x402_payment({"pay_to": "0x"}, 1)
+def test_idem_key_binds_query_chain_and_nonce():
+    k = oracle._idem_key(7, 8453, "n-abc")
+    assert k == "q7:c8453:n-abc"
+    # different query / chain / nonce -> different key (exactly-once binding)
+    assert oracle._idem_key(8, 8453, "n-abc") != k
+    assert oracle._idem_key(7, 1, "n-abc") != k
+    assert oracle._idem_key(7, 8453, "n-xyz") != k

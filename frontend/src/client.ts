@@ -64,8 +64,9 @@ function makeClient() {
 
 /**
  * Submit a new oracle query. Returns the transaction hash. The contract's
- * `request_data` method enqueues the query into its registry; resolution
- * happens in a later `resolve` transaction (or same-tx, design-dependent).
+ * `request_data` method enqueues the query into its registry; resolution is a
+ * two-phase flow handled by `authorizeQuery` -> (off-chain relayer settles the
+ * x402 micro-payment on Base) -> `fetchQuery`.
  */
 async function submitQuery(
   client: ReturnType<typeof makeClient>["client"],
@@ -92,17 +93,59 @@ async function submitQuery(
 // ---------------------------------------------------------------------------
 
 /**
- * Ask the oracle to resolve a previously-submitted query by id. This is the
- * transaction where the GenVM performs the x402 fetch, the LLM extraction,
- * and validators run the equivalence principle to reach consensus.
+ * PHASE A — authorize. The GenVM probes the URL, reaches consensus on the
+ * x402 payment requirements, and (deterministically, once) binds them to the
+ * query, moving it PENDING -> AUTHORIZED. No money moves here. A free resource
+ * is marked ready immediately and needs no relayer round-trip.
  */
-async function resolveQuery(
+async function authorizeQuery(
   client: ReturnType<typeof makeClient>["client"],
   queryId: bigint,
 ): Promise<string> {
   const txHash = await client.writeContract({
     address: CONTRACT_ADDRESS,
-    functionName: "resolve",
+    functionName: "resolve_authorize",
+    args: [queryId],
+    value: 0n,
+  });
+  await client.waitForTransactionReceipt({
+    hash: txHash,
+    status: TransactionStatus.FINALIZED,
+  });
+  return txHash;
+}
+
+/**
+ * Read the canonical, query-bound payment intent an AUTHORIZED query exposes.
+ * The OFF-CHAIN relayer reads this, signs a Base AA-session-key payment that
+ * matches exactly these fields (the on-chain spend cap is the authoritative
+ * backstop), settles one USDC micro-payment, then calls `submit_payment_proof`
+ * with the settlement reference. The frontend never touches a payment key.
+ */
+async function readPaymentIntent(
+  client: ReturnType<typeof makeClient>["client"],
+  queryId: bigint,
+): Promise<PaymentIntent> {
+  return (await client.readContract({
+    address: CONTRACT_ADDRESS,
+    functionName: "get_payment_intent",
+    args: [queryId],
+  })) as unknown as PaymentIntent;
+}
+
+/**
+ * PHASE B — fetch. Requires the query to be AUTHORIZED and carry a payment
+ * proof (a free resource gets its proof during authorize). The GenVM fetches
+ * the now-entitled content, runs LLM extraction, and validators reach
+ * consensus on the EXTRACTED JSON. Moves AUTHORIZED -> RESOLVED.
+ */
+async function fetchQuery(
+  client: ReturnType<typeof makeClient>["client"],
+  queryId: bigint,
+): Promise<string> {
+  const txHash = await client.writeContract({
+    address: CONTRACT_ADDRESS,
+    functionName: "resolve_fetch",
     args: [queryId],
     value: 0n,
   });
@@ -118,11 +161,28 @@ async function resolveQuery(
 // ---------------------------------------------------------------------------
 
 interface OracleResult {
-  status: "PENDING" | "RESOLVED" | "REJECTED";
+  status: "PENDING" | "AUTHORIZED" | "RESOLVED" | "REJECTED";
   url: string;
   extracted: string;
   paidAtomic: string; // serialized bigint
-  paymentTxRef: string; // Base settlement reference (illustrative)
+  paymentTxRef: string; // Base settlement reference
+  payTo: string;
+  asset: string;
+  chainId: string; // serialized bigint
+  idemKey: string; // exactly-once settlement key bound to this query
+  hasProof: boolean;
+}
+
+/** Canonical payment intent the off-chain relayer must honor exactly. */
+interface PaymentIntent {
+  queryId: string;
+  payTo: string;
+  amountAtomic: string;
+  asset: string;
+  chainId: string;
+  nonce: string;
+  expiry: string;
+  idemKey: string;
 }
 
 /** Read the current state of a query from contract storage (no gas). */
@@ -162,9 +222,23 @@ async function main() {
   // read the emitted event / return value to learn the assigned id.
   const queryId = 0n;
 
-  console.log("Triggering paid resolution...");
-  const resolveTx = await resolveQuery(client, queryId);
-  console.log("Resolved in tx:", resolveTx);
+  console.log("Phase A: authorizing (probe + bind payment requirements)...");
+  const authTx = await authorizeQuery(client, queryId);
+  console.log("Authorized in tx:", authTx);
+
+  // The query is now AUTHORIZED. For a paywalled resource, an OFF-CHAIN relayer
+  // would read the payment intent, settle one USDC micro-payment on Base via a
+  // spend-capped AA session key, and call submit_payment_proof(queryId, ref).
+  // That relayer is intentionally NOT part of this browser client (it holds the
+  // payment key). For a free resource the proof is already set by authorize.
+  const intent = await readPaymentIntent(client, queryId).catch(() => null);
+  if (intent) {
+    console.log("Payment intent for relayer:", intent);
+  }
+
+  console.log("Phase B: fetching entitled content + extraction...");
+  const fetchTx = await fetchQuery(client, queryId);
+  console.log("Resolved in tx:", fetchTx);
 
   const result = await readResult(client, queryId);
   console.log("Oracle result:", result);
@@ -176,5 +250,12 @@ main().catch((err) => {
   process.exitCode = 1;
 });
 
-export { makeClient, submitQuery, resolveQuery, readResult };
-export type { OracleQuery, OracleResult };
+export {
+  makeClient,
+  submitQuery,
+  authorizeQuery,
+  readPaymentIntent,
+  fetchQuery,
+  readResult,
+};
+export type { OracleQuery, OracleResult, PaymentIntent };

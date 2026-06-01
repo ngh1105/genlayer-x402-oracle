@@ -28,51 +28,63 @@ Workarounds are all bad:
 ## The idea: don't hold a key, pay per request
 
 x402 reframes access from *"prove you own a subscription key"* to *"pay a few
-cents for this one response."* The flow is HTTP-native:
+cents for this one response."* The flow is HTTP-native, but settling a payment
+from inside validator consensus needs care (see below). The contract splits
+resolution into two phases so the money moves **exactly once**:
 
-1. The oracle requests a premium URL.
-2. The server replies **`402 Payment Required`** with machine-readable payment
-   instructions (pay-to address, asset, amount, network, nonce, expiry).
-3. The oracle signs a **stablecoin micro-payment** (USDC on Base) and retries
-   with an `X-PAYMENT` header.
-4. The server verifies + settles the payment and returns **`200` + content**.
-5. The oracle runs an **LLM extraction** on the content.
-6. **Validators reach consensus** on the extracted answer via an equivalence
-   principle, and the result is written to GenLayer state.
+1. **Authorize** (`resolve_authorize`): the GenVM probes the premium URL. If the
+   server replies **`402 Payment Required`** with machine-readable instructions
+   (pay-to, asset, amount, network, nonce, expiry), validators reach consensus
+   on those requirements and the contract **binds + validates** them once
+   (amount <= ceiling, chain == Base, asset == USDC, nonce bound to the
+   queryId). The query moves to **AUTHORIZED**. No money moves here.
+2. **Settle** (off-chain relayer): a relayer reads the query-bound payment
+   intent, signs **one** USDC micro-payment on Base using a **spend-capped AA
+   session key** (the cap + payTo allowlist are enforced **on-chain on Base**),
+   then calls `submit_payment_proof(queryId, ref)`. The key never touches
+   GenLayer.
+3. **Fetch** (`resolve_fetch`): once a proof is recorded, the GenVM fetches the
+   now-entitled `200` content, runs an **LLM extraction**, and **validators
+   reach consensus on the extracted answer** (never on the signature). The
+   result is written to GenLayer state (**RESOLVED**).
 
-No standing subscription. No shared secret. Just pay-as-you-go data, with the
-spend ceiling enforced per query.
+No standing subscription. No shared secret. The spend ceiling is enforced both
+in-contract (per query) and on-chain on Base (the authoritative backstop).
 
 ---
 
 ## Architecture at a glance
 
 ```
-        ┌──────────────┐  request_data(url, prompt, cap)   ┌──────────────────┐
-        │   Frontend   │ ─────────────────────────────────▶│  GenLayer chain  │
-        │ (genlayer-js)│  resolve(queryId)                  │  X402Oracle.py   │
-        └──────────────┘ ◀──────────── get_result ──────────└──────────────────┘
-                                                                     │
-                                  per-validator, inside              │ gl.eq_principle
-                                  the equivalence principle          ▼
-                                                          ┌────────────────────────┐
-                                                          │ gl.nondet.web.render()  │
-                                                          │   GET premium url       │
-                                                          └───────────┬─────────────┘
-                                                                      │ 402 + reqs
-                                                                      ▼
-                                                          ┌────────────────────────┐
-                                                          │ sign micro-payment      │
-                                                          │ (USDC) ── settle ──▶ Base│
-                                                          └───────────┬─────────────┘
-                                                                      │ X-PAYMENT
-                                                                      ▼
-                                                          ┌────────────────────────┐
-                                                          │ render() again → 200    │
-                                                          │ gl.nondet.exec_prompt() │
-                                                          │   LLM extracts JSON     │
-                                                          └────────────────────────┘
+  Frontend (genlayer-js)                         GenLayer chain (X402Oracle.py)
+      |  request_data(url, prompt, cap)                 |
+      |------------------------------------------------>|  PENDING
+      |  resolve_authorize(queryId)                     |
+      |------------------------------------------------>|  PHASE A (non-det):
+      |                                                 |   gl.nondet.web.get(url)
+      |                                                 |   -> 402 -> consensus on reqs
+      |                                                 |   bind+validate once -> AUTHORIZED
+      |  get_payment_intent(queryId) [view]             |
+      |<------------------------------------------------|
+      v
+  OFF-CHAIN relayer (holds Base AA session key)
+      |  sign ONE USDC micro-payment (spend cap enforced ON-CHAIN on Base)
+      |-----------------------------------------------> Base (USDC settle)
+      |  submit_payment_proof(queryId, ref)             |
+      |------------------------------------------------>|  proof recorded
+      |  resolve_fetch(queryId)                         |  PHASE B (non-det):
+      |------------------------------------------------>|   gl.nondet.web.get(url) -> 200
+      |                                                 |   gl.nondet.exec_prompt -> JSON
+      |                                                 |   eq_principle consensus -> RESOLVED
+      |  get_result(queryId) [view]                     |
+      |<------------------------------------------------|
 ```
+
+**The payment never happens inside the per-validator consensus block.** The
+GenVM only produces VALUES there (the parsed 402, the extracted JSON); the
+single money-moving step is the off-chain relayer settling once, gated by the
+on-chain spend cap. That is what avoids the "every validator pays N times"
+hazard.
 
 **Two chains, two jobs:**
 
@@ -91,20 +103,30 @@ sequenceDiagram
     participant U as User / Frontend
     participant GL as GenLayer (X402Oracle)
     participant V as Validators (each)
+    participant R as Off-chain relayer
     participant S as Premium Server
     participant B as Base (USDC)
 
     U->>GL: request_data(url, prompt, cap)
     GL-->>U: queryId (PENDING)
-    U->>GL: resolve(queryId)
-    Note over GL,V: runs inside gl.eq_principle.prompt_non_comparative
-    V->>S: GET url
+
+    U->>GL: resolve_authorize(queryId)
+    Note over GL,V: PHASE A - non-det probe under gl.eq_principle
+    V->>S: gl.nondet.web.get(url)
     S-->>V: 402 Payment Required (+ payment reqs)
-    V->>V: validate amount <= cap, network == Base
-    V->>B: sign + submit USDC micro-payment (TODO: signing)
-    B-->>V: settlement reference
-    V->>S: GET url + X-PAYMENT header
-    S-->>V: 200 OK + content (+ X-PAYMENT-RESPONSE)
+    Note over GL: deterministic, once: validate amount<=cap, chain==Base,\nasset==USDC, bind nonce to queryId -> AUTHORIZED
+    GL-->>U: AUTHORIZED
+
+    U->>GL: get_payment_intent(queryId) [view]
+    GL-->>R: payTo, amount, asset, chainId, nonce, expiry, idemKey
+    R->>B: sign + settle ONE USDC payment (spend cap ON-CHAIN)
+    B-->>R: settlement reference
+    R->>GL: submit_payment_proof(queryId, ref)
+
+    U->>GL: resolve_fetch(queryId)
+    Note over GL,V: PHASE B - non-det fetch under gl.eq_principle
+    V->>S: gl.nondet.web.get(url) [entitled]
+    S-->>V: 200 OK + content
     V->>V: gl.nondet.exec_prompt() extracts JSON
     Note over GL,V: eq principle compares validators' JSON answers
     GL-->>U: get_result(queryId) -> RESOLVED
@@ -159,47 +181,48 @@ per-query ceiling, and the payment key never lives in contract storage
     |-- package.json           # genlayer-js client deps (stub, not installed)
     |-- tsconfig.json
     `-- src/
-        `-- client.ts          # connect -> submit -> resolve -> read
+        `-- client.ts          # connect -> submit -> authorize -> fetch -> read
 ```
 
 ---
 
 ## Limitations
 
-- **Payment signing is stubbed.** `_sign_x402_payment()` raises
-  `NotImplementedError`. Wiring real, key-safe signing is the core open problem
-  (see roadmap). Everything else is illustrative.
-- **Representative GenLayer API.** Calls like `gl.nondet.web.render(...,
-  headers=...)`, `gl.eq_principle.prompt_non_comparative(...)`, and storage
-  decorators follow public conventions circa 2025 but are marked
-  `# ASSUMPTION:` where not guaranteed. Verify against the SDK version you
-  deploy with.
-- **Cost / determinism of paying inside consensus.** If every validator pays,
-  you multiply the micro-payment by the validator count and risk double-spend
-  unless payments are idempotent (bound to the query's nonce). See the
-  threat-model notes on a single-payer / co-processor design.
+- **Real X-PAYMENT signing lives off-chain by design.** GenVM has no primitive
+  to hold a secp256k1 key or sign an arbitrary payload, and value-moving side
+  effects must happen once post-consensus (not per validator). So the signing
+  is an explicit **relayer interface boundary**: the contract binds + validates
+  the payment and exposes it via `get_payment_intent`; the relayer signs one
+  Base AA-session-key payment (spend cap enforced on-chain) and reports it via
+  `submit_payment_proof`. The relayer itself is not included in this repo.
+- **Representative GenLayer API.** Calls like `gl.nondet.web.get(...)`,
+  `gl.eq_principle.prompt_non_comparative(...)`, and storage decorators follow
+  the verified SDK surface for GenVM v0.2.16 but a few kwargs (e.g. a `headers`
+  arg on `web.get`) are marked `# ASSUMPTION:` where not guaranteed. Verify
+  against the SDK version you deploy with.
 - **Server honesty.** A malicious 402 server can lie about price or content;
   the whitelist + ceiling + consensus mitigate but don't fully eliminate this.
-- **Not audited.** Deterministic paths are deployed + verified on studionet
-  (see `DEPLOYMENTS.md`), but the contract is unaudited and the paid `resolve()`
-  path is not production-ready.
+- **Not audited.** Deterministic + two-phase paths are unit-tested and the
+  contract compiles/deploys (see `DEPLOYMENTS.md`), but the contract is
+  unaudited and a live paid `resolve_fetch()` against a real paywall has not
+  been exercised end-to-end (no real funds spent).
 
 ---
 
 ## Roadmap
 
-1. **Key-safe signing** - implement `_sign_x402_payment` via one of: validator
-   threshold signatures, a Base account-abstraction session key with an on-chain
-   spend cap, or a trusted co-processor returning only the signed blob.
-2. **Idempotent / single-payer settlement** - bind each payment to the query
-   nonce so re-execution across validators can't double-pay or replay.
-3. **Receipt verification** - verify the `X-PAYMENT-RESPONSE` settlement proof
-   against Base before accepting content.
-4. **Pluggable equivalence** - let the requester pick tolerance vs.
+1. **Production relayer** - ship the off-chain relayer that reads
+   `get_payment_intent`, signs the Base AA-session-key payment, and calls
+   `submit_payment_proof`. The contract side (binding, validation, exactly-once
+   state machine) is implemented; the relayer service is the remaining piece.
+2. **Receipt verification** - have `resolve_fetch` (or a guard before it) verify
+   the `X-PAYMENT-RESPONSE` / settlement reference against Base before accepting
+   content, instead of trusting the relayer's recorded proof.
+3. **Pluggable equivalence** - let the requester pick tolerance vs.
    non-comparative per query type.
-5. **Refunds & disputes** - handle 402 servers that take payment but don't
+4. **Refunds & disputes** - handle 402 servers that take payment but don't
    deliver.
-6. **Frontend** - real wallet connection, event-driven `queryId` discovery,
+5. **Frontend** - real wallet connection, event-driven `queryId` discovery,
    result rendering.
 
 ---
